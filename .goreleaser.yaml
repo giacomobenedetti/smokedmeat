@@ -1,0 +1,158 @@
+version: 2
+project_name: smokedmeat
+
+before:
+  hooks:
+    - go mod verify
+    - make build-release-embed-brisket RELEASE_VERSION={{ .Version }} RELEASE_COMMIT={{ .Commit }} RELEASE_DATE={{ .Date }}
+
+builds:
+  - id: counter
+    main: ./cmd/counter
+    binary: counter
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Version={{ .Version }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Commit={{ .Commit }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Date={{ .Date }}
+
+  - id: kitchen
+    main: ./cmd/kitchen
+    binary: kitchen
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Version={{ .Version }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Commit={{ .Commit }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Date={{ .Date }}
+
+  - id: brisket
+    main: ./cmd/brisket
+    binary: brisket
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Version={{ .Version }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Commit={{ .Commit }} -X github.com/boostsecurityio/smokedmeat/internal/buildinfo.Date={{ .Date }}
+
+archives:
+  - id: counter
+    ids:
+      - counter
+    formats: ['tar.gz']
+    name_template: >-
+      {{ .Binary }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+
+  - id: brisket
+    ids:
+      - brisket
+    formats: ['tar.gz']
+    name_template: >-
+      {{ .Binary }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: ['zip']
+
+checksum:
+  name_template: checksums.txt
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - ${artifact}
+      - --yes
+    artifacts: checksum
+    output: true
+
+dockers_v2:
+  - id: kitchen
+    dockerfile: deployments/Dockerfile.kitchen.release
+    ids:
+      - kitchen
+    images:
+      - ghcr.io/boostsecurityio/smokedmeat-kitchen
+    tags:
+      - "{{ .Version }}"
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.description: "SmokedMeat Kitchen - C2 server"
+      org.opencontainers.image.name: "smokedmeat-kitchen"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+  - id: cloud-shell
+    dockerfile: deployments/Dockerfile.cloud-shell.release
+    extra_files:
+      - deployments/cloud-shell-entrypoint.sh
+      - deployments/cloud-shell-gcp-init-creds.py
+    images:
+      - ghcr.io/boostsecurityio/smokedmeat-cloud-shell
+    tags:
+      - "{{ .Version }}"
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.description: "SmokedMeat Cloud Shell - operator shell runtime"
+      org.opencontainers.image.name: "smokedmeat-cloud-shell"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+docker_signs:
+  - ids:
+      - kitchen
+      - cloud-shell
+    cmd: cosign
+    artifacts: all
+    args:
+      - sign
+      - ${artifact}@${digest}
+      - --yes
+
+changelog:
+  use: github-native
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

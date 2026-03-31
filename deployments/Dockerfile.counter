@@ -1,0 +1,23 @@
+# Copyright (C) 2026 boostsecurity.io
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# syntax=docker/dockerfile:1
+FROM cgr.dev/chainguard/go:latest@sha256:18d53e852a00e36248cbac6de13dfe727585c0f3c358ff885912e1a23efb71b8 AS builder
+
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download || true
+
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/cache/go-build \
+    GOCACHE=/cache/go-build CGO_ENABLED=0 go build \
+    -tags netgo \
+    -ldflags='-w -s -extldflags "-static"' \
+    -trimpath \
+    -o /counter ./cmd/counter
+
+FROM smokedmeat-cloud-base
+COPY --from=builder /counter /counter
+ENV OPERATOR_NAME=""
+ENTRYPOINT ["/counter"]

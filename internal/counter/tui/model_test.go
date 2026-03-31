@@ -1,0 +1,760 @@
+// Copyright (C) 2026 boostsecurity.io
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package tui
+
+import (
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/boostsecurityio/smokedmeat/internal/models"
+	"github.com/boostsecurityio/smokedmeat/internal/pantry"
+	"github.com/boostsecurityio/smokedmeat/internal/poutine"
+)
+
+// =============================================================================
+// Model Creation Tests
+// =============================================================================
+
+func TestNewModel(t *testing.T) {
+	config := Config{
+		SessionID:  "test-session",
+		KitchenURL: "http://localhost:8080",
+	}
+
+	m := NewModel(config)
+
+	assert.Equal(t, config.SessionID, m.config.SessionID)
+	assert.Equal(t, FocusInput, m.focus)
+	assert.Empty(t, m.sessions)
+	assert.Empty(t, m.output)
+	assert.Empty(t, m.history)
+	assert.Equal(t, -1, m.historyIndex)
+	assert.Equal(t, "disconnected", m.connectionState)
+	assert.False(t, m.quitting)
+	assert.NotNil(t, m.lightRye) // Should be initialized with KitchenURL
+}
+
+func TestNewModel_NoKitchenURL(t *testing.T) {
+	config := Config{
+		SessionID: "test-session",
+		// KitchenURL not set
+	}
+
+	m := NewModel(config)
+
+	assert.Nil(t, m.lightRye) // Should be nil without KitchenURL
+}
+
+func TestNewModel_ActivityLogAutoExpandEnabled(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+
+	assert.True(t, m.activityLogAutoExpand)
+	assert.Equal(t, defaultActivityHeight, m.activityRegionHeight())
+}
+
+func TestExecuteCommand_ExpandsActivityLogWhenCommandAddsEntries(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.phase = PhaseRecon
+	m.view = ViewFindings
+	m.input.SetValue("status")
+
+	result, _ := m.executeCommand()
+	model := result.(Model)
+
+	require.False(t, model.activityLogExpandedUntil.IsZero())
+	assert.WithinDuration(t, time.Now().Add(2*time.Second), model.activityLogExpandedUntil, time.Second)
+	assert.Greater(t, model.activityLog.Len(), 0)
+	assert.Equal(t, expandedActivityHeight, model.activityRegionHeight())
+}
+
+func TestExecuteCommand_DoesNotExpandActivityLogWithoutNewEntries(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.phase = PhaseRecon
+	m.view = ViewFindings
+	m.input.SetValue("help")
+
+	result, _ := m.executeCommand()
+	model := result.(Model)
+
+	assert.True(t, model.activityLogExpandedUntil.IsZero())
+	assert.Equal(t, 0, model.activityLog.Len())
+}
+
+func TestExecuteCommand_DoesNotExpandActivityLogWhenDisabled(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.phase = PhaseRecon
+	m.view = ViewFindings
+	m.activityLogAutoExpand = false
+	m.input.SetValue("status")
+
+	result, _ := m.executeCommand()
+	model := result.(Model)
+
+	assert.True(t, model.activityLogExpandedUntil.IsZero())
+	assert.Greater(t, model.activityLog.Len(), 0)
+	assert.Equal(t, defaultActivityHeight, model.activityRegionHeight())
+}
+
+func TestHandleSetCommand_ActivityLogAutoExpandToggle(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.activityLogExpandedUntil = time.Now().Add(2 * time.Second)
+
+	result, _ := m.handleSetCommand("activity-log", "autoexpand off")
+	model := result.(Model)
+	assert.False(t, model.activityLogAutoExpand)
+	assert.True(t, model.activityLogExpandedUntil.IsZero())
+
+	result, _ = model.handleSetCommand("activity-log", "on")
+	model = result.(Model)
+	assert.True(t, model.activityLogAutoExpand)
+}
+
+func TestHandleSetCommand_TargetAddsActivityLogEntry(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+
+	result, _ := m.handleSetCommand("target", "repo:acme/private-infra")
+	model := result.(Model)
+
+	require.NotNil(t, model.activityLog)
+	require.NotEmpty(t, model.activityLog.Entries())
+	assert.Contains(t, model.activityLog.Entries()[len(model.activityLog.Entries())-1].Message, "repo:acme/private-infra")
+	assert.Equal(t, "acme/private-infra", model.target)
+	assert.Equal(t, "repo", model.targetType)
+}
+
+func TestUpdate_ShiftPressTemporarilyExpandsActivityLog(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.phase = PhaseRecon
+	m.view = ViewFindings
+	m.focus = FocusInput
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyLeftShift})
+	model := result.(Model)
+	assert.True(t, model.activityLogShiftHeld)
+	assert.Equal(t, expandedActivityHeight, model.activityRegionHeight())
+
+	result, _ = model.Update(tea.KeyReleaseMsg{Code: tea.KeyLeftShift})
+	model = result.(Model)
+	assert.False(t, model.activityLogShiftHeld)
+	assert.Equal(t, defaultActivityHeight, model.activityRegionHeight())
+}
+
+func TestUpdate_ActivityLogToggleShortcut(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.phase = PhaseRecon
+	m.view = ViewFindings
+	m.focus = FocusSessions
+
+	result, _ := m.Update(tea.KeyPressMsg{Text: "L", Code: 'L'})
+	model := result.(Model)
+	assert.True(t, model.activityLogManualExpanded)
+	assert.Equal(t, expandedActivityHeight, model.activityRegionHeight())
+
+	result, _ = model.Update(tea.KeyPressMsg{Text: "L", Code: 'L'})
+	model = result.(Model)
+	assert.False(t, model.activityLogManualExpanded)
+	assert.Equal(t, defaultActivityHeight, model.activityRegionHeight())
+}
+
+func TestView_RequestsKeyReleaseEvents(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.ready = true
+	m.width = 80
+	m.height = 24
+
+	view := m.View()
+
+	assert.True(t, view.KeyboardEnhancements.ReportEventTypes)
+}
+
+func TestRenderAgentPanel_ShowsCompactProvenanceAndConnectedBack(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.activeAgent = &AgentState{
+		ID:        "agt_1234567890",
+		Repo:      "acme/private-infra",
+		Workflow:  ".github/workflows/deploy.yml",
+		Job:       "deploy",
+		StartTime: time.Now().Add(-time.Minute),
+	}
+
+	out := stripANSI(m.RenderAgentPanel(120, 4))
+
+	assert.Contains(t, out, "Connected back:")
+	assert.Contains(t, out, "acme/private-infra")
+	assert.Contains(t, out, ".github/workflows/deploy.yml")
+	assert.Contains(t, out, "deploy")
+}
+
+// =============================================================================
+// Focus Enum Tests
+// =============================================================================
+
+func TestFocus_Values(t *testing.T) {
+	// Verify focus constants exist and are distinct
+	focuses := []Focus{FocusSessions, FocusInput, FocusOutput}
+	seen := make(map[Focus]bool)
+
+	for _, f := range focuses {
+		assert.False(t, seen[f], "Focus value should be unique")
+		seen[f] = true
+	}
+}
+
+// =============================================================================
+// Session Tests
+// =============================================================================
+
+func TestSession_Fields(t *testing.T) {
+	now := time.Now()
+	s := Session{
+		AgentID:   "brisket-001",
+		Hostname:  "runner-1",
+		OS:        "linux",
+		Arch:      "amd64",
+		LastSeen:  now,
+		IsOnline:  true,
+		SessionID: "session-123",
+	}
+
+	assert.Equal(t, "brisket-001", s.AgentID)
+	assert.Equal(t, "runner-1", s.Hostname)
+	assert.Equal(t, "linux", s.OS)
+	assert.Equal(t, "amd64", s.Arch)
+	assert.Equal(t, now, s.LastSeen)
+	assert.True(t, s.IsOnline)
+	assert.Equal(t, "session-123", s.SessionID)
+}
+
+// =============================================================================
+// OutputLine Tests
+// =============================================================================
+
+func TestOutputLine_Fields(t *testing.T) {
+	now := time.Now()
+	o := OutputLine{
+		Time:    now,
+		Type:    "success",
+		Content: "Operation completed",
+	}
+
+	assert.Equal(t, now, o.Time)
+	assert.Equal(t, "success", o.Type)
+	assert.Equal(t, "Operation completed", o.Content)
+}
+
+// =============================================================================
+// Vulnerability Tests
+// =============================================================================
+
+func TestVulnerability_Fields(t *testing.T) {
+	v := Vulnerability{
+		ID:         "V001",
+		Repository: "org/repo",
+		Workflow:   ".github/workflows/ci.yml",
+		Line:       42,
+		Context:    "bash",
+		Trigger:    "pull_request",
+		Expression: "${{ github.event.issue.title }}",
+		Severity:   "critical",
+	}
+
+	assert.Equal(t, "V001", v.ID)
+	assert.Equal(t, "org/repo", v.Repository)
+	assert.Equal(t, ".github/workflows/ci.yml", v.Workflow)
+	assert.Equal(t, 42, v.Line)
+	assert.Equal(t, "bash", v.Context)
+	assert.Equal(t, "pull_request", v.Trigger)
+	assert.Equal(t, "${{ github.event.issue.title }}", v.Expression)
+	assert.Equal(t, "critical", v.Severity)
+}
+
+// =============================================================================
+// AddOutput Tests
+// =============================================================================
+
+func TestModel_AddOutput(t *testing.T) {
+	m := NewModel(Config{})
+
+	m.AddOutput("info", "Test message")
+
+	require.Len(t, m.output, 1)
+	assert.Equal(t, "info", m.output[0].Type)
+	assert.Equal(t, "Test message", m.output[0].Content)
+	assert.False(t, m.output[0].Time.IsZero())
+}
+
+func TestModel_AddOutput_MultipleTypes(t *testing.T) {
+	m := NewModel(Config{})
+
+	m.AddOutput("info", "Info message")
+	m.AddOutput("success", "Success message")
+	m.AddOutput("error", "Error message")
+	m.AddOutput("warning", "Warning message")
+
+	require.Len(t, m.output, 4)
+	assert.Equal(t, "info", m.output[0].Type)
+	assert.Equal(t, "success", m.output[1].Type)
+	assert.Equal(t, "error", m.output[2].Type)
+	assert.Equal(t, "warning", m.output[3].Type)
+}
+
+func TestModel_AddOutput_TruncatesAtLimit(t *testing.T) {
+	m := NewModel(Config{})
+
+	// Add more than 1000 lines
+	for i := 0; i < 1005; i++ {
+		m.AddOutput("info", "Line")
+	}
+
+	// Should be truncated to 1000
+	assert.Len(t, m.output, 1000)
+}
+
+// =============================================================================
+// SelectedSession Tests
+// =============================================================================
+
+func TestModel_SelectedSession_Empty(t *testing.T) {
+	m := NewModel(Config{})
+
+	session := m.SelectedSession()
+
+	assert.Nil(t, session)
+}
+
+func TestModel_SelectedSession_WithSessions(t *testing.T) {
+	m := NewModel(Config{})
+	m.sessions = []Session{
+		{AgentID: "agent-1"},
+		{AgentID: "agent-2"},
+		{AgentID: "agent-3"},
+	}
+	m.selectedIndex = 1
+
+	session := m.SelectedSession()
+
+	require.NotNil(t, session)
+	assert.Equal(t, "agent-2", session.AgentID)
+}
+
+func TestModel_SelectedSession_InvalidIndex(t *testing.T) {
+	m := NewModel(Config{})
+	m.sessions = []Session{
+		{AgentID: "agent-1"},
+	}
+	m.selectedIndex = 5 // Out of bounds
+
+	session := m.SelectedSession()
+
+	assert.Nil(t, session)
+}
+
+func TestModel_SelectedSession_NegativeIndex(t *testing.T) {
+	m := NewModel(Config{})
+	m.sessions = []Session{
+		{AgentID: "agent-1"},
+	}
+	m.selectedIndex = -1
+
+	session := m.SelectedSession()
+
+	assert.Nil(t, session)
+}
+
+// =============================================================================
+// Pantry Integration Tests
+// =============================================================================
+
+func TestModel_SetPantry(t *testing.T) {
+	m := NewModel(Config{})
+	p := pantry.New()
+
+	m.SetPantry(p)
+
+	assert.Equal(t, p, m.pantry)
+}
+
+func TestModel_SetPantry_Nil(t *testing.T) {
+	m := NewModel(Config{})
+
+	m.SetPantry(nil)
+
+	assert.Nil(t, m.pantry)
+}
+
+// =============================================================================
+// Import Recon To Pantry Tests
+// =============================================================================
+
+func TestModel_importReconToPantry(t *testing.T) {
+	m := NewModel(Config{})
+
+	recon := &models.ReconResult{
+		AgentID:  "brisket-001",
+		Platform: models.PlatformGitHubActions,
+		Runner: &models.RunnerInfo{
+			Hostname: "runner-1",
+		},
+		Repository: &models.RepoInfo{
+			FullName: "acme/api",
+			Owner:    "acme",
+			Name:     "api",
+		},
+		Workflow: &models.WorkflowInfo{
+			Name: "CI",
+			Path: ".github/workflows/ci.yml",
+			Job:  "build",
+		},
+		Secrets: []models.DetectedSecret{
+			{Name: "AWS_KEY", HighValue: true},
+			{Name: "NPM_TOKEN", HighValue: false},
+		},
+	}
+
+	imported, err := m.importReconToPantry(recon)
+
+	require.NoError(t, err)
+	assert.Greater(t, imported, 0)
+	assert.NotNil(t, m.pantry)
+}
+
+func TestModel_importReconToPantry_CreatesNewPantry(t *testing.T) {
+	m := NewModel(Config{})
+	assert.Nil(t, m.pantry)
+
+	recon := &models.ReconResult{
+		AgentID:  "brisket-001",
+		Platform: models.PlatformGitHubActions,
+	}
+
+	_, err := m.importReconToPantry(recon)
+
+	require.NoError(t, err)
+	assert.NotNil(t, m.pantry) // Should have created pantry
+}
+
+func TestModel_importReconToPantry_WithOIDC(t *testing.T) {
+	m := NewModel(Config{})
+
+	recon := &models.ReconResult{
+		AgentID:  "brisket-001",
+		Platform: models.PlatformGitHubActions,
+		OIDC: &models.OIDCInfo{
+			Available: true,
+		},
+	}
+
+	imported, err := m.importReconToPantry(recon)
+
+	require.NoError(t, err)
+	assert.Greater(t, imported, 1) // Agent + OIDC token
+}
+
+// =============================================================================
+// Import Scan To Pantry Tests
+// =============================================================================
+
+func TestModel_importScanToPantry(t *testing.T) {
+	m := NewModel(Config{})
+
+	scan := &models.ScanResult{
+		Repository:    "acme/api",
+		TotalFindings: 2,
+		Findings: []models.ScanFinding{
+			{
+				RuleID:   "unpinned-action",
+				Path:     ".github/workflows/ci.yml",
+				Line:     10,
+				Severity: "warning",
+				Title:    "Unpinned action",
+			},
+			{
+				RuleID:   "dangerous-trigger",
+				Path:     ".github/workflows/ci.yml",
+				Line:     5,
+				Severity: "error",
+				Title:    "Dangerous trigger",
+			},
+		},
+	}
+
+	imported, err := m.importScanToPantry(scan)
+
+	require.NoError(t, err)
+	assert.Greater(t, imported, 0)
+	assert.NotNil(t, m.pantry)
+}
+
+func TestModel_importScanToPantry_NoFindings(t *testing.T) {
+	m := NewModel(Config{})
+
+	scan := &models.ScanResult{
+		Repository:    "acme/api",
+		TotalFindings: 0,
+		Findings:      []models.ScanFinding{},
+	}
+
+	imported, err := m.importScanToPantry(scan)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, imported)
+}
+
+func TestModel_importScanToPantry_SeverityMapping(t *testing.T) {
+	m := NewModel(Config{})
+
+	scan := &models.ScanResult{
+		Repository:    "acme/api",
+		TotalFindings: 3,
+		Findings: []models.ScanFinding{
+			{RuleID: "r1", Path: "a.yml", Severity: "error"},   // -> critical
+			{RuleID: "r2", Path: "b.yml", Severity: "warning"}, // -> high
+			{RuleID: "r3", Path: "c.yml", Severity: "note"},    // -> medium
+		},
+	}
+
+	imported, err := m.importScanToPantry(scan)
+
+	require.NoError(t, err)
+	assert.Greater(t, imported, 0)
+}
+
+// =============================================================================
+// Config Tests
+// =============================================================================
+
+func TestConfig_Fields(t *testing.T) {
+	c := Config{
+		SessionID:  "session-123",
+		KitchenURL: "http://localhost:8080",
+		Operator:   "test-operator",
+	}
+
+	assert.Equal(t, "session-123", c.SessionID)
+	assert.Equal(t, "http://localhost:8080", c.KitchenURL)
+	assert.Equal(t, "test-operator", c.Operator)
+}
+
+// =============================================================================
+// Attack Tree Tests
+// =============================================================================
+
+func TestModel_RebuildTree_EmptyPantry(t *testing.T) {
+	m := NewModel(Config{})
+	m.pantry = pantry.New()
+
+	// Should not panic on empty pantry
+	m.RebuildTree()
+
+	// Empty pantry results in nil tree root
+	assert.Nil(t, m.treeRoot)
+	assert.Empty(t, m.treeNodes)
+}
+
+func TestModel_RebuildTree_WithData(t *testing.T) {
+	m := NewModel(Config{})
+	m.pantry = pantry.New()
+
+	// Add some test data
+	m.pantry.AddAsset(pantry.Asset{
+		ID:   "repo:test/repo",
+		Name: "test/repo",
+		Type: pantry.AssetRepository,
+	})
+
+	m.RebuildTree()
+
+	assert.NotNil(t, m.treeRoot)
+	assert.Greater(t, len(m.treeNodes), 0)
+}
+
+func TestModel_TreeNavigation(t *testing.T) {
+	m := NewModel(Config{})
+	m.pantry = pantry.New()
+	m.RebuildTree()
+
+	// Navigation on empty tree should not panic
+	m.TreeCursorDown()
+	m.TreeCursorUp()
+	m.TreeToggleExpand()
+}
+
+// =============================================================================
+// Bug 3: TransitionToPhase(PhaseRecon) resets tree filter
+// =============================================================================
+
+func TestTransitionToRecon_ResetsTreeFilter(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.treeFiltered = true
+
+	m.TransitionToPhase(PhaseRecon)
+
+	assert.False(t, m.treeFiltered, "TransitionToPhase(PhaseRecon) should reset treeFiltered to false")
+}
+
+func TestTransitionToRecon_FromPostExploit(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.phase = PhasePostExploit
+	m.treeFiltered = true
+
+	m.TransitionToPhase(PhaseRecon)
+
+	assert.Equal(t, PhaseRecon, m.phase, "Should transition to PhaseRecon")
+	assert.False(t, m.treeFiltered, "treeFiltered should be reset when transitioning from PostExploit to Recon")
+}
+
+// =============================================================================
+// Bug 4: Init restores initialTokenInfo from config
+// =============================================================================
+
+func TestInit_RestoresInitialAccessToken(t *testing.T) {
+	m := NewModel(Config{
+		SessionID:                "test",
+		InitialAccessToken:       "ghp_saved123",
+		InitialAccessTokenSource: "op",
+	})
+
+	m.Init()
+
+	// NOTE: initialTokenInfo is hydrated in NewModel() based on Config.
+	// Init() is a value receiver so it cannot mutate the caller's copy.
+	require.NotNil(t, m.initialTokenInfo, "initialTokenInfo should be populated when Config.InitialAccessToken is set")
+	assert.Equal(t, "ghp_saved123", m.initialTokenInfo.Value)
+	assert.Equal(t, TokenTypeClassicPAT, m.initialTokenInfo.Type)
+	assert.Equal(t, "op", m.initialTokenInfo.Source)
+	assert.False(t, m.initialTokenInfo.FetchedAt.IsZero())
+}
+
+func TestInit_NoInitialAccessToken(t *testing.T) {
+	m := NewModel(Config{
+		SessionID: "test",
+	})
+
+	m.Init()
+
+	assert.Nil(t, m.initialTokenInfo, "initialTokenInfo should stay nil when Config.InitialAccessToken is empty")
+}
+
+// =============================================================================
+// importAnalysisToPantry → extractVulnerabilitiesFromPantry round-trip
+// =============================================================================
+
+func TestImportAnalysis_RoundTrip_PreservesAllFields(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+
+	result := &poutine.AnalysisResult{
+		Success:    true,
+		Target:     "acme/api",
+		TargetType: "repo",
+		Repository: "acme/api",
+		Findings: []poutine.Finding{
+			{
+				ID:                "V001",
+				Repository:        "acme/api",
+				Workflow:          ".github/workflows/ci.yml",
+				Line:              42,
+				Job:               "build",
+				RuleID:            "injection",
+				Title:             "Code injection via comment body",
+				Severity:          "critical",
+				Context:           "comment_body",
+				Trigger:           "issue_comment",
+				Expression:        "${{ github.event.comment.body }}",
+				InjectionSources:  []string{"github.event.comment.body"},
+				ReferencedSecrets: []string{"AWS_SECRET_KEY"},
+				LOTPTool:          "bash",
+				LOTPAction:        "run",
+				LOTPTargets:       []string{"build-step"},
+				GateTriggers:      []string{"/deploy"},
+				GateRaw:           "contains(github.event.comment.body, '/deploy')",
+				GateUnsolvable:    "",
+			},
+		},
+	}
+
+	m.importAnalysisToPantry(result)
+
+	vulns := m.extractVulnerabilitiesFromPantry()
+	require.Len(t, vulns, 1)
+	v := vulns[0]
+
+	assert.Equal(t, "acme/api", v.Repository)
+	assert.Equal(t, ".github/workflows/ci.yml", v.Workflow)
+	assert.Equal(t, "build", v.Job)
+	assert.Equal(t, "critical", v.Severity)
+	assert.Equal(t, "comment_body", v.Context)
+	assert.Equal(t, "issue_comment", v.Trigger)
+	assert.Equal(t, "${{ github.event.comment.body }}", v.Expression)
+	assert.Equal(t, []string{"github.event.comment.body"}, v.InjectionSources)
+	assert.Equal(t, []string{"AWS_SECRET_KEY"}, v.ReferencedSecrets)
+	assert.Equal(t, "bash", v.LOTPTool)
+	assert.Equal(t, "run", v.LOTPAction)
+	assert.Equal(t, []string{"build-step"}, v.LOTPTargets)
+	assert.Equal(t, []string{"/deploy"}, v.GateTriggers)
+	assert.Equal(t, "contains(github.event.comment.body, '/deploy')", v.GateRaw)
+	assert.Empty(t, v.GateUnsolvable)
+}
+
+func TestImportAnalysis_RoundTrip_CommentInjectionDetected(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+
+	result := &poutine.AnalysisResult{
+		Success:    true,
+		Target:     "acme/api",
+		TargetType: "repo",
+		Repository: "acme/api",
+		Findings: []poutine.Finding{
+			{
+				ID:               "V001",
+				Repository:       "acme/api",
+				Workflow:         ".github/workflows/ci.yml",
+				RuleID:           "injection",
+				Severity:         "critical",
+				Trigger:          "issue_comment",
+				InjectionSources: []string{"github.event.comment.body"},
+			},
+		},
+	}
+
+	m.importAnalysisToPantry(result)
+	vulns := m.extractVulnerabilitiesFromPantry()
+	require.Len(t, vulns, 1)
+
+	assert.True(t, isCommentInjection(&vulns[0]),
+		"isCommentInjection should return true after pantry round-trip")
+}
+
+func TestImportAnalysis_RoundTrip_UnsolvableGate(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+
+	result := &poutine.AnalysisResult{
+		Success:    true,
+		Target:     "acme/api",
+		TargetType: "repo",
+		Repository: "acme/api",
+		Findings: []poutine.Finding{
+			{
+				ID:             "V001",
+				Repository:     "acme/api",
+				Workflow:       ".github/workflows/ci.yml",
+				RuleID:         "injection",
+				Severity:       "high",
+				GateRaw:        "github.actor == 'admin'",
+				GateUnsolvable: "comparison with non-controllable field: github.actor",
+			},
+		},
+	}
+
+	m.importAnalysisToPantry(result)
+	vulns := m.extractVulnerabilitiesFromPantry()
+	require.Len(t, vulns, 1)
+
+	assert.Equal(t, "github.actor == 'admin'", vulns[0].GateRaw)
+	assert.Equal(t, "comparison with non-controllable field: github.actor", vulns[0].GateUnsolvable)
+	assert.Empty(t, vulns[0].GateTriggers)
+}

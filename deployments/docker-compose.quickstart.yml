@@ -1,0 +1,91 @@
+# Copyright (C) 2026 boostsecurity.io
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# Dev quickstart Docker setup with Cloudflare tunnel
+# Usage: make dev-quickstart
+
+services:
+  # Cloudflare tunnel - provides public HTTPS URL without domain setup
+  cloudflared:
+    image: cloudflare/cloudflared:latest@sha256:e9bcb2ef08d25632ff74344e73a025f4f4bf12718335b196fa0e670cacace8c5
+    command: tunnel --no-autoupdate --url http://kitchen:8080
+    depends_on:
+      kitchen:
+        condition: service_started
+
+  # NATS JetStream
+  nats:
+    image: nats:scratch@sha256:30c913e575318c477aa3a81da3f71a00a518e7091d6219d75c8b157e5844f92c
+    command: ["-js", "-c", "/nats.conf"]
+    expose:
+      - "4222"
+      - "8222"
+    volumes:
+      - nats-data:/data
+      - ../configs/nats.conf:/nats.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Init container to fix volume permissions
+  kitchen-init:
+    image: cgr.dev/chainguard/busybox@sha256:ecc152fe3dece44e60d1aa0fbbefb624902b4af0e2ed8c2c84dfbce653ff064f
+    user: root
+    command: ["sh", "-c", "chown -R 65532:65532 /data"]
+    volumes:
+      - kitchen-data:/data
+
+  # Kitchen C2 server - uses token auth for quick start
+  kitchen:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.kitchen.quickstart
+    expose:
+      - "8080"
+    ports:
+      - "${KITCHEN_BROWSER_PORT:-18180}:8080"
+    environment:
+      - NATS_URL=nats://nats:4222
+      - KITCHEN_PORT=8080
+      - KITCHEN_DB_PATH=/data/kitchen.db
+      - AUTH_MODE=token
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+    volumes:
+      - kitchen-data:/data
+    depends_on:
+      kitchen-init:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Counter TUI - connects directly to Kitchen via Docker network
+  counter:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.counter
+    user: "${UID:-65532}:${GID:-65532}"
+    environment:
+      - KITCHEN_URL=http://kitchen:8080
+      - KITCHEN_EXTERNAL_URL=${KITCHEN_EXTERNAL_URL:-}
+      - KITCHEN_BROWSER_URL=${KITCHEN_BROWSER_URL:-}
+      - OPERATOR_TOKEN=${AUTH_TOKEN:-}
+      - OPERATOR_NAME=
+      - SMOKEDMEAT_CONFIG_DIR=/config
+      - COLORTERM=truecolor
+    volumes:
+      - ${HOME}/.smokedmeat:/config
+    stdin_open: true
+    tty: true
+    depends_on:
+      - kitchen
+    profiles:
+      - counter
+
+volumes:
+  nats-data:
+  kitchen-data:

@@ -1,0 +1,61 @@
+# SmokedMeat Production Caddyfile
+# Reverse proxy with automatic TLS via Let's Encrypt
+#
+# Usage:
+#   1. Set DOMAIN environment variable (e.g., kitchen.example.com)
+#   2. Ensure DNS A record points to this server
+#   3. Caddy will automatically obtain and renew TLS certificates
+
+# Catch-all: reject requests to unknown hosts (IP scanners, wrong domain)
+# This MUST come before the real domain block
+:443, :80 {
+	abort
+}
+
+{$DOMAIN:localhost} {
+	# TLS configuration - automatic via ACME (Let's Encrypt)
+	# For localhost/development, Caddy uses a local CA
+
+	# Logging
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+
+	# Strip identifying headers from all responses
+	header -Via
+	header -Server
+	header -X-Powered-By
+
+	# Block /health from public access - return 401 to be opaque
+	handle /health {
+		respond "unauthorized" 401
+	}
+
+	# WebSocket endpoint for Counter operators
+	# Caddy v2 handles WebSocket upgrades automatically
+	handle /ws {
+		reverse_proxy kitchen:8080
+	}
+
+	# All other requests go to Kitchen
+	handle {
+		reverse_proxy kitchen:8080 {
+			# Health check
+			health_uri /health
+			health_interval 30s
+			health_timeout 5s
+
+			# Trusted proxy headers
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}
+
+# Health check endpoint for load balancers
+:8080 {
+	respond /health "OK" 200
+}

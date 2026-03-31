@@ -1,0 +1,47 @@
+# Copyright (C) 2026 boostsecurity.io
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# syntax=docker/dockerfile:1
+# Batteries-included Kitchen build - builds Brisket in-container
+# Used by: make dev-quickstart (Kitchen builds in Docker, Counter runs locally)
+
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:9925d3017788558fa8f27e8bb160b791e56202b60c91fbcc5c867de3175986c8 AS upx
+RUN apk add --no-cache upx
+
+FROM cgr.dev/chainguard/go:latest@sha256:18d53e852a00e36248cbac6de13dfe727585c0f3c358ff885912e1a23efb71b8 AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum* ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download || true
+
+COPY . .
+
+# Build Brisket agent (Linux amd64) in-container, then compress with UPX
+COPY --from=upx /usr/bin/upx /usr/bin/upx
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/cache/go-build \
+    GOCACHE=/cache/go-build CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -tags netgo \
+    -ldflags='-w -s -extldflags "-static"' \
+    -trimpath \
+    -o internal/kitchen/agents/brisket-linux-amd64 ./cmd/brisket \
+    && upx internal/kitchen/agents/brisket-linux-amd64
+
+# Build Kitchen binary with embedded Brisket
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/cache/go-build \
+    GOCACHE=/cache/go-build CGO_ENABLED=0 go build \
+    -tags netgo \
+    -ldflags='-w -s -extldflags "-static"' \
+    -trimpath \
+    -o /kitchen ./cmd/kitchen
+
+# Runtime stage - Chainguard git (includes git for poutine analysis)
+FROM cgr.dev/chainguard/git@sha256:3ad30d069f0ddc158596b121b4684022faf2b2aba8c156b5ee97c5251d39c638
+
+COPY --from=builder /kitchen /kitchen
+
+EXPOSE 8080
+
+ENTRYPOINT ["/kitchen"]

@@ -1,0 +1,486 @@
+// Copyright (C) 2026 boostsecurity.io
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package tui
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"charm.land/lipgloss/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/boostsecurityio/smokedmeat/internal/cachepoison"
+	"github.com/boostsecurityio/smokedmeat/internal/models"
+)
+
+func stubRenderers() ContentRenderers {
+	return ContentRenderers{
+		Tree: func(w, h int) string {
+			return padToSize("TREE", w, h)
+		},
+		Menu: func(w, h int) string {
+			return padToSize("MENU", w, h)
+		},
+		Loot: func(w, h int) string {
+			return padToSize("LOOT", w, h)
+		},
+		Activity: func(w, h int, _ bool) string {
+			return padToSize("ACTIVITY", w, h)
+		},
+		Agent: func(w, h int) string {
+			return padToSize("AGENT", w, h)
+		},
+		HasLoot: true,
+	}
+}
+
+func padToSize(label string, w, h int) string {
+	lines := make([]string, h)
+	for i := range lines {
+		if i == 0 && w >= len(label) {
+			lines[i] = label + strings.Repeat(" ", w-len(label))
+		} else {
+			lines[i] = strings.Repeat(" ", w)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fixedHeader(w int) string {
+	return "HEADER" + strings.Repeat(" ", w-6)
+}
+
+func fixedInput(w int) string {
+	line1 := strings.Repeat("─", w)
+	line2 := "❯ command" + strings.Repeat(" ", w-11)
+	line3 := strings.Repeat("─", w)
+	return line1 + "\n" + line2 + "\n" + line3
+}
+
+func fixedStatus(w int) string {
+	return "STATUS" + strings.Repeat(" ", w-6)
+}
+
+func TestStickersLayout_InputHeightConstant(t *testing.T) {
+	sl := NewStickersLayout()
+	sl.Resize(120, 40)
+	renderers := stubRenderers()
+
+	inputNoHint := fixedInput(120)
+	inputWithHint := fixedInput(120)
+
+	out1 := sl.RenderIdle(fixedHeader(120), inputNoHint, fixedStatus(120), false, renderers, false)
+	out2 := sl.RenderIdle(fixedHeader(120), inputWithHint, fixedStatus(120), false, renderers, false)
+
+	lines1 := strings.Split(out1, "\n")
+	lines2 := strings.Split(out2, "\n")
+
+	assert.Equal(t, len(lines1), len(lines2), "output height should not change with hints")
+
+	headerLine1 := lines1[0]
+	headerLine2 := lines2[0]
+	assert.Equal(t, headerLine1, headerLine2, "header position should not shift")
+}
+
+func TestStickersLayout_ResizeReflows(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sl.Resize(120, 40)
+	out1 := sl.RenderIdle(fixedHeader(120), fixedInput(120), fixedStatus(120), false, renderers, false)
+
+	sl.Resize(200, 60)
+	out2 := sl.RenderIdle(fixedHeader(200), fixedInput(200), fixedStatus(200), false, renderers, false)
+
+	lines1 := strings.Split(out1, "\n")
+	lines2 := strings.Split(out2, "\n")
+
+	assert.Equal(t, 40, len(lines1), "should fill terminal height at 40")
+	assert.Equal(t, 60, len(lines2), "should fill terminal height at 60")
+}
+
+func TestStickersLayout_NarrowCollapse(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sl.Resize(70, 30)
+	assert.True(t, sl.IsNarrow())
+
+	out := sl.RenderIdle(fixedHeader(70), fixedInput(70), fixedStatus(70), false, renderers, false)
+	lines := strings.Split(out, "\n")
+
+	require.Equal(t, 30, len(lines), "should fill terminal height")
+	assert.NotContains(t, out, "MENU", "narrow mode should not show menu panel")
+	assert.NotContains(t, out, "LOOT", "narrow mode should not show loot panel")
+	assert.Contains(t, out, "TREE", "narrow mode should show tree")
+}
+
+func TestStickersLayout_WideShowsBothColumns(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sl.Resize(120, 40)
+	assert.False(t, sl.IsNarrow())
+
+	out := sl.RenderIdle(fixedHeader(120), fixedInput(120), fixedStatus(120), false, renderers, false)
+
+	assert.Contains(t, out, "TREE", "wide mode should show tree")
+	assert.Contains(t, out, "MENU", "wide mode should show menu")
+	assert.Contains(t, out, "LOOT", "wide mode should show loot")
+	assert.Contains(t, out, "ACTIVITY", "should show activity")
+}
+
+func TestStickersLayout_AgentView(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sl.Resize(120, 40)
+	out := sl.RenderAgent(fixedHeader(120), fixedInput(120), fixedStatus(120), false, renderers, false)
+
+	assert.Contains(t, out, "TREE", "agent view should show tree")
+	assert.Contains(t, out, "AGENT", "agent view should show agent panel")
+	assert.Contains(t, out, "LOOT", "agent view should show loot")
+	assert.Contains(t, out, "MENU", "agent view should show menu")
+	assert.Contains(t, out, "ACTIVITY", "agent view should show activity")
+}
+
+func TestStickersLayout_RenderStackedPanels_CollapsesEmptyLoot(t *testing.T) {
+	sl := NewStickersLayout()
+
+	var withLootMenuHeight, withLootLootHeight int
+	sl.renderStackedPanels(60, 20, ContentRenderers{
+		Menu: func(w, h int) string {
+			withLootMenuHeight = h
+			return padToSize("MENU", w, h)
+		},
+		Loot: func(w, h int) string {
+			withLootLootHeight = h
+			return padToSize("LOOT", w, h)
+		},
+		HasLoot: true,
+	})
+
+	var noLootMenuHeight, noLootLootHeight int
+	sl.renderStackedPanels(60, 20, ContentRenderers{
+		Menu: func(w, h int) string {
+			noLootMenuHeight = h
+			return padToSize("MENU", w, h)
+		},
+		Loot: func(w, h int) string {
+			noLootLootHeight = h
+			return padToSize("LOOT", w, h)
+		},
+		HasLoot: false,
+	})
+
+	assert.Greater(t, noLootMenuHeight, withLootMenuHeight)
+	assert.Less(t, noLootLootHeight, withLootLootHeight)
+	assert.LessOrEqual(t, noLootLootHeight, 3)
+}
+
+func TestStickersLayout_FlexHeightCalculation(t *testing.T) {
+	sl := NewStickersLayout()
+
+	sl.Resize(100, 40)
+	assert.Equal(t, 40-fixedOverhead, sl.FlexHeight())
+
+	sl.Resize(100, 10)
+	assert.Equal(t, 4, sl.FlexHeight(), "should clamp to minimum of 4")
+
+	sl.Resize(100, 6)
+	assert.Equal(t, 4, sl.FlexHeight(), "should clamp to minimum of 4")
+}
+
+func TestStickersLayout_FlexHeightShrinksWhenActivityExpands(t *testing.T) {
+	sl := NewStickersLayout()
+
+	sl.Resize(100, 40)
+	sl.SetActivityHeight(expandedActivityHeight)
+
+	assert.Equal(t, 40-fixedChromeHeight-expandedActivityHeight, sl.FlexHeight())
+}
+
+func TestStickersLayout_HeaderPositionStable(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sl.Resize(120, 40)
+
+	input3Lines := fixedInput(120)
+	out := sl.RenderIdle(fixedHeader(120), input3Lines, fixedStatus(120), false, renderers, false)
+
+	lines := strings.Split(out, "\n")
+	require.True(t, len(lines) >= 1)
+	assert.True(t, strings.HasPrefix(lines[0], "HEADER"), "first line should be header")
+
+	lastLine := lines[len(lines)-1]
+	assert.True(t, strings.HasPrefix(lastLine, "STATUS"), "last line should be status bar")
+}
+
+func TestStickersLayout_MultipleResizes(t *testing.T) {
+	sl := NewStickersLayout()
+	renderers := stubRenderers()
+
+	sizes := [][2]int{{120, 40}, {80, 24}, {60, 20}, {200, 60}, {100, 35}}
+	for _, size := range sizes {
+		w, h := size[0], size[1]
+		sl.Resize(w, h)
+		out := sl.RenderIdle(fixedHeader(w), fixedInput(w), fixedStatus(w), false, renderers, false)
+		lines := strings.Split(out, "\n")
+		assert.Equal(t, h, len(lines), "output should match terminal height for %dx%d", w, h)
+	}
+}
+
+func TestVulnLabel(t *testing.T) {
+	tests := []struct {
+		context string
+		trigger string
+		want    string
+	}{
+		{"issue_body", "", "Bash injection (issue body)"},
+		{"issue_title", "", "Bash injection (issue title)"},
+		{"pr_body", "", "Bash injection (PR body)"},
+		{"pr_title", "", "Bash injection (PR title)"},
+		{"comment_body", "", "Bash injection (comment)"},
+		{"commit_message", "", "Bash injection (commit msg)"},
+		{"git_branch", "", "Bash injection (branch name)"},
+		{"github_script", "", "JS injection"},
+		{"github_script", "issue_comment", "JS injection (comment)"},
+		{"github_script", "issues", "JS injection (issue)"},
+		{"github_script", "pull_request", "JS injection (PR)"},
+		{"bash_run", "", "Bash injection"},
+		{"bash_run", "issue_comment", "Bash injection (comment)"},
+		{"bash_run", "pull_request_target", "Bash injection (PR)"},
+		{"bash_run", "workflow_dispatch", "Bash injection (workflow_dispatch)"},
+		{"workflow_dispatch_input", "", "Bash injection (dispatch input)"},
+		{"", "", "Bash injection"},
+		{"", "issues", "Bash injection (issue)"},
+		{"custom_ctx", "", "Bash injection (custom_ctx)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.context+"_"+tt.trigger, func(t *testing.T) {
+			got := vulnLabel(tt.context, tt.trigger)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestWaitingTipsForMethod(t *testing.T) {
+	tests := []struct {
+		method  string
+		keyword string
+	}{
+		{"Create Issue", "Issue/comment"},
+		{"Add Comment", "issue_comment"},
+		{"Create PR", "pull_request"},
+		{"Trigger Dispatch", "actions:write"},
+		{"npm install", "package.json"},
+		{"Unknown Method", "payload"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			tips := waitingTipsForMethod(tt.method)
+			require.NotEmpty(t, tips)
+			found := false
+			for _, tip := range tips {
+				if strings.Contains(tip, tt.keyword) {
+					found = true
+					break
+				}
+			}
+			assert.True(t, found, "tips for %q should mention %q, got %v", tt.method, tt.keyword, tips)
+		})
+	}
+}
+
+func TestRenderWaitingView_ShowsETA(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 120
+	m.waiting = NewWaitingState("stg-123", "acme/api", "V001", ".github/workflows/ci.yml", "build", "Create Issue", 0)
+	m.waiting.StartTime = time.Now().Add(-12 * time.Second)
+
+	out := stripANSI(m.renderWaitingView(24))
+
+	assert.Contains(t, out, "Elapsed:")
+	assert.Contains(t, out, "ETA:")
+	assert.Contains(t, out, "stg-123")
+}
+
+func TestRenderWaitingView_ShowsWriterCacheStatus(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 120
+	m.waiting = NewWaitingState("stg-123", "acme/api", "V001", ".github/workflows/lint.yml", "lint", "Add Comment", 0)
+	m.waiting.CachePoison = &CachePoisonWaitingState{
+		Victim:        cachepoison.VictimCandidate{Workflow: ".github/workflows/deploy.yml"},
+		WriterAgentID: "agt-writer",
+		WriterStatus:  &models.CachePoisonStatus{Status: "armed"},
+	}
+
+	out := stripANSI(m.renderWaitingView(24))
+
+	assert.Contains(t, out, "Writer cache: armed")
+}
+
+func TestHelpCommandsForPhase(t *testing.T) {
+	tests := []struct {
+		phase   Phase
+		present string
+		absent  string
+	}{
+		{PhaseSetup, "set token", "sessions"},
+		{PhaseRecon, "1-5", "sessions"},
+		{PhasePostExploit, "sessions", "1-5"},
+		{PhasePivot, "select <id>", "1-5"},
+		{PhaseWizard, "help", "analyze"},
+		{PhaseWaiting, "license", "graph"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.phase.String(), func(t *testing.T) {
+			cmds := helpCommandsForPhase(tt.phase)
+			joined := strings.Join(cmds, "\n")
+			assert.Contains(t, joined, tt.present, "phase %s should include %q", tt.phase, tt.present)
+			assert.NotContains(t, joined, tt.absent, "phase %s should not include %q", tt.phase, tt.absent)
+		})
+	}
+}
+
+func TestRenderNewStatusBar_ShowsPersistentTarget(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 120
+	m.targetType = "repo"
+	m.target = "acme/private-infra"
+	m.view = ViewFindings
+
+	out := stripANSI(m.renderNewStatusBar())
+
+	assert.Contains(t, out, "repo:acme/private-infra")
+	assert.Contains(t, out, "🎯")
+	assert.NotContains(t, out, "Target:")
+}
+
+func TestPaneNavHints_ShowsDeepAnalyzeShortcutForSelectedRepo(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.focus = FocusSessions
+	m.paneFocus = PaneFocusFindings
+	root := &TreeNode{ID: "root", Expanded: true}
+	repo := &TreeNode{ID: "repo:acme/private-infra", Type: TreeNodeRepo, Label: "acme/private-infra", Parent: root}
+	root.Children = []*TreeNode{repo}
+	m.treeRoot = root
+	m.ReflattenTree()
+
+	hints := stripANSI(m.paneNavHints())
+
+	assert.Contains(t, hints, "d:deep")
+	assert.Contains(t, hints, "s:target")
+}
+
+func TestStatusBar_PivotedOnlyWhenTokenDiffers(t *testing.T) {
+	m := Model{width: 120}
+	token := "ghp_abcdef1234567890abcdef1234567890abcd"
+	m.tokenInfo = &TokenInfo{Value: token, Type: TokenTypeClassicPAT, Source: "config"}
+	m.initialTokenInfo = &TokenInfo{Value: token, Type: TokenTypeClassicPAT, Source: "pat"}
+
+	status := m.renderNewStatusBar()
+	assert.NotContains(t, status, "pivoted", "same token value should not show (pivoted)")
+
+	m.tokenInfo = &TokenInfo{Value: "ghs_different123456", Type: TokenTypeInstallApp, Source: "loot:app"}
+	status = m.renderNewStatusBar()
+	assert.Contains(t, status, "pivoted", "different token value should show (pivoted)")
+}
+
+func TestRenderNewStatusBar_ShowsThemeAndLogHintsInAgentView(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 180
+	m.view = ViewAgent
+	m.focus = FocusSessions
+
+	out := stripANSI(m.renderNewStatusBar())
+
+	assert.Contains(t, out, "/:jump")
+	assert.Contains(t, out, "?:help")
+	assert.Contains(t, out, "Shift+L:log")
+	assert.Contains(t, out, "Shift+I:implants")
+	assert.Contains(t, out, "t:theme")
+}
+
+func TestRenderNewStatusBar_PrioritizesThemeHintAtWalkthroughWidth(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 140
+	m.view = ViewFindings
+	m.focus = FocusSessions
+	m.tokenInfo = &TokenInfo{
+		Value: "ghp_abcdef1234567890abcdef1234567890abcd",
+		Type:  TokenTypeClassicPAT,
+		Owner: "whooli",
+	}
+	m.targetType = "org"
+	m.target = "whooli"
+
+	out := stripANSI(m.renderNewStatusBar())
+
+	assert.Contains(t, out, "/:jump")
+	assert.Contains(t, out, "?:help")
+	assert.Contains(t, out, "Shift+L:log")
+	assert.Contains(t, out, "Shift+I:implants")
+}
+
+func TestRenderNewStatusBar_HidesThemeAndLogHintsWhenInputFocused(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.width = 140
+	m.view = ViewFindings
+	m.focus = FocusInput
+	m.tokenInfo = &TokenInfo{
+		Value: "ghp_abcdef1234567890abcdef1234567890abcd",
+		Type:  TokenTypeClassicPAT,
+		Owner: "whooli",
+	}
+	m.targetType = "org"
+	m.target = "whooli"
+
+	out := stripANSI(m.renderNewStatusBar())
+
+	assert.Contains(t, out, "/:jump")
+	assert.Contains(t, out, "?:help")
+	assert.NotContains(t, out, "Shift+L:log")
+	assert.NotContains(t, out, "Shift+I:implants")
+	assert.NotContains(t, out, "t:theme")
+}
+
+func TestGlobalStatusHintsForWidth_DropsThemeBeforeImplants(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.view = ViewFindings
+	m.focus = FocusSessions
+
+	full := m.globalStatusHintsForWidth(-1)
+	fullWidth := lipgloss.Width(full)
+
+	var tight string
+	for width := 1; width < fullWidth; width++ {
+		hints := stripANSI(m.globalStatusHintsForWidth(width))
+		if strings.Contains(hints, "Shift+I:implants") && !strings.Contains(hints, "t:theme") {
+			tight = hints
+			break
+		}
+	}
+
+	require.NotEmpty(t, tight)
+	assert.Contains(t, tight, "Shift+I:implants")
+	assert.NotContains(t, tight, "t:theme")
+}
+
+func BenchmarkStickersLayout_Render(b *testing.B) {
+	sl := NewStickersLayout()
+	sl.Resize(120, 40)
+	renderers := stubRenderers()
+	header := fixedHeader(120)
+	input := fixedInput(120)
+	status := fixedStatus(120)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sl.RenderIdle(header, input, status, false, renderers, false)
+	}
+}

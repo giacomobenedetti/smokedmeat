@@ -1,0 +1,15 @@
+.git
+.idea
+.vscode
+.claude
+.DS_Store
+bin
+dist
+data
+.docker-data
+tmp
+docs
+configs/*.yaml
+deployments/.env
+*.db
+*.log

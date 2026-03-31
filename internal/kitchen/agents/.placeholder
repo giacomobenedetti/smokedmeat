@@ -1,0 +1,2 @@
+# Placeholder for go:embed directive
+# Real agent binaries are built via `make build-brisket`

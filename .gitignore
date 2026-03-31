@@ -1,0 +1,67 @@
+# Binaries
+dist/
+!internal/cachepoison/assets/actions-checkout/dist/
+!internal/cachepoison/assets/actions-checkout/dist/utility.js
+internal/kitchen/agents/*
+!internal/kitchen/agents/embed.go
+!internal/kitchen/agents/.placeholder
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/counter
+/kitchen
+/brisket
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local configuration (don't commit secrets)
+configs/*.yaml
+!configs/*.example.yaml
+data/
+
+# Environment files (deployment secrets)
+.env
+deployments/.env
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# E2E testing (Claude Code)
+.claude/e2e/.env
+.claude/e2e/config.yaml
+.claude/e2e/tokens.yaml
+.claude/e2e/counter-pane-e2e-goat-*.log
+.claude/e2e/cloud-shell/
+.claude/e2e/ssh-shell/sessions/
+# Docker volumes (local dev)
+.docker-data/
+
+# Temporary files
+tmp/
+*.tmp
+*.log

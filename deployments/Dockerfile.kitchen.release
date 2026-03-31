@@ -1,0 +1,13 @@
+# Copyright (C) 2026 boostsecurity.io
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+# syntax=docker/dockerfile:1
+FROM cgr.dev/chainguard/git@sha256:3ad30d069f0ddc158596b121b4684022faf2b2aba8c156b5ee97c5251d39c638
+
+ARG TARGETPLATFORM
+
+COPY $TARGETPLATFORM/kitchen /kitchen
+
+EXPOSE 8080
+
+ENTRYPOINT ["/kitchen"]

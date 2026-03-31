@@ -1,0 +1,22 @@
+# Development override - exposes ports for local development
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# This exposes NATS and Kitchen directly for local Counter development
+# without requiring Caddy TLS.
+
+services:
+  # Disable Caddy in dev mode
+  caddy:
+    profiles:
+      - production
+
+  # Expose NATS ports for local development
+  nats:
+    ports:
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # Monitoring
+
+  # Expose Kitchen directly for local development
+  kitchen:
+    ports:
+      - "8080:8080"

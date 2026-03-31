@@ -1,0 +1,16 @@
+# Copyright (C) 2026 boostsecurity.io
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:9925d3017788558fa8f27e8bb160b791e56202b60c91fbcc5c867de3175986c8
+
+RUN apk add --no-cache bash jq curl git openssh-client aws-cli-2 google-cloud-sdk python-3 az kubectl-latest
+
+# Standalone gsutil on Chainguard doesn't honor CLOUDSDK_AUTH_ACCESS_TOKEN;
+# delegate to gcloud storage which does.
+RUN mkdir -p /usr/local/bin /usr/local/lib/sm-cloud \
+    && printf '#!/bin/bash\nexec gcloud storage "$@"\n' > /usr/local/bin/gsutil \
+    && chmod +x /usr/local/bin/gsutil
+
+COPY deployments/cloud-shell-entrypoint.sh     /usr/local/bin/sm-cloud-entrypoint
+COPY deployments/cloud-shell-gcp-init-creds.py /usr/local/lib/sm-cloud/gcp-init-creds.py
+RUN chmod +x /usr/local/bin/sm-cloud-entrypoint
