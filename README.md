@@ -44,90 +44,73 @@ SmokedMeat is a post-exploitation framework for CI/CD pipelines. Point it at a G
 
 ## Quick Start
 
-Try SmokedMeat from source with Docker, Go 1.25+, and `make`.
+Need Docker and `make`. If you want to run from source instead of the pinned release path, also install Go 1.25+.
 
 ```bash
 git clone https://github.com/boostsecurityio/smokedmeat.git
 cd smokedmeat
+make quickstart
+# Then use a classic PAT with public_repo and target the whooli GitHub org.
+```
+
+`make quickstart` is the recommended first run. It starts the stable release quickstart stack locally and launches the operator TUI (`Counter`) against the local C2 teamserver (`Kitchen`).
+
+The setup wizard walks you through:
+1. **GitHub PAT**  - A classic PAT with `public_repo` scope is enough for `whooli`. For private repos, you'll need `repo` scope.
+2. **Target**  - Enter `whooli` or your own org/repo
+3. **Analysis**  - Scans workflows for vulnerabilities and presents exploitable findings
+
+For the full challenge flow, see the [`whooli` guide](docs/WHOOLI.md) or go straight to the [`whooli` GitHub org](https://github.com/whooli).
+
+When you are done:
+```bash
+make quickstart-down       # Stop containers
+make quickstart-purge      # Stop and delete all data
+```
+
+Working from source instead:
+
+```bash
 make dev-quickstart
 ```
 
-This builds the `smokedmeat-cloud-shell` image, starts the quickstart infrastructure in Docker, and launches Counter locally via `go run ./cmd/counter`. If the quickstart stack is already healthy, rerunning `make dev-quickstart` reuses the existing tunnel and NATS, refreshes Kitchen, and jumps straight back into Counter:
+`make dev-quickstart` builds the local `smokedmeat-cloud-shell` image, starts `cloudflared`, `nats`, and the C2 teamserver (`Kitchen`), then launches the operator TUI from source.
 
-| Component | What it does |
-|-----------|-------------|
-| **cloudflared** | Creates a temporary Cloudflare tunnel so GitHub runners can reach your Kitchen over HTTPS  - no domain or DNS setup needed |
-| **nats** | NATS JetStream message bus for Kitchen-to-implant communication |
-| **kitchen** | C2 teamserver (HTTP API + WebSocket) with shared-token auth and embedded Brisket binaries |
-| **smokedmeat-cloud-shell** | Docker runtime for `cloud shell` and `ssh shell` when Counter runs locally |
+If you want the infrastructure first and the operator TUI later:
 
-The setup wizard walks you through:
-1. **GitHub PAT**  - A classic PAT with `public_repo` scope is enough to try it against the `whooli` test org. For private repos, you'll need `repo` scope.
-2. **Target**  - Enter `whooli` (our public CI/CD attack playground) or your own org/repo
-3. **Analysis**  - Scans workflows for vulnerabilities and presents exploitable findings
+```bash
+make dev-quickstart-up
+make dev-quickstart-counter
+```
 
-When done:
+When you are done:
 ```bash
 make dev-quickstart-down   # Stop containers
 make dev-quickstart-purge  # Stop and delete all data
 ```
 
-`make quickstart` now targets an explicitly pinned released version instead of following the newest tag automatically. That keeps quickstart stable and breaks the recursion between "just published" and "good enough to pin". Use `make quickstart-version` to inspect the current pin. Maintainers advance it with `make quickstart-pin VERSION=v0.0.1-rc1`, which verifies the immutable GitHub release, records the published Counter asset digests, and pins the signed Kitchen and `smokedmeat-cloud-shell` image digests before updating `configs/quickstart-release.mk`. The first release-backed path is expected to embed only `brisket-linux-amd64` in Kitchen, so quickstart releases will initially target Linux x86_64 runners for agent delivery.
+## Core Components
 
-### Dev Quickstart Notes
-
-| Feature | `make dev-quickstart` |
-|---------|-----------------------|
-| Clipboard (copy payloads) | Works on the host |
-| Open browser links | Opens directly on the host |
-| Cloud shell (gcloud, aws, az) | Uses the `smokedmeat-cloud-shell` Docker image that `make dev-quickstart` prebuilds |
-| Tunnel URL | Random, changes on restart |
-| Auth | Shared token |
-
-If you want to start the infrastructure first and launch Counter later:
-
-```bash
-# Start just the infrastructure in Docker
-make dev-quickstart-up
-
-# Launch Counter with the quickstart token and Kitchen URLs
-make dev-quickstart-counter
-```
+| Standard term | SmokedMeat name | Description |
+|---------------|-----------------|-------------|
+| **Operator TUI** | `Counter` | Terminal interface for analysis, payload delivery, and post-exploitation workflow. |
+| **C2 teamserver** | `Kitchen` | API and WebSocket server for operator sessions, stagers, callbacks, and graph state. |
+| **Implant** | `Brisket` | Agent delivered to compromised CI runners for beaconing, command execution, and pivoting. |
+| **Browser graph view** | `Browser View` | Live attack graph served by the C2 teamserver at `/graph`. |
 
 ## Deployment Modes
 
-### Development Quickstart (Local Evaluation)
+| Mode | Use it when | Entry point |
+|------|-------------|-------------|
+| **Quickstart** | Fastest first run on the pinned release | `make quickstart` |
+| **Dev Quickstart** | Working on the source tree locally | `make dev-quickstart` |
+| **Hosted Teamserver** | Running a real engagement with a stable domain | [docs/deployment.md](docs/deployment.md) |
 
-`make dev-quickstart` is the current fastest path from source. It uses Docker for cloudflared, NATS, and Kitchen, shared-token auth, local `go run ./cmd/counter`, and a prebuilt `smokedmeat-cloud-shell:latest` image for `cloud shell` and `ssh shell`. When the stack is already healthy, rerunning it keeps the existing tunnel and NATS but refreshes Kitchen before launching Counter again.
-
-### Quickstart (Release-backed)
-
-`make quickstart` uses the pinned release in `configs/quickstart-release.mk`. It verifies the cached Counter archive against the pinned GitHub release digest, runs Docker with the pinned Kitchen image digest, and overrides compiled Counter to use the pinned `smokedmeat-cloud-shell` image digest.
-
-This means quickstart can intentionally stay one version behind the newest release until that release has been validated. Maintainers update the pin with `make quickstart-pin VERSION=v...`, inspect it with `make quickstart-version`, and then use `make quickstart`. `make quickstart-pin` requires `gh`, `cosign`, and `docker` in `PATH`.
-
-### Self-Hosted (Engagements)
-
-For a real red team engagement, deploy Kitchen on a dedicated host with a stable domain. Stager callbacks from compromised CI runners will land on this host, so it needs a routable IP and DNS.
-
-This mode uses:
-- **Caddy** reverse proxy with automatic Let's Encrypt TLS
-- **SSH challenge-response auth**  - each operator authenticates with their SSH key, giving per-operator audit trails
-- **Docker Compose** for Kitchen + NATS
-- Counter runs **natively** on each operator's workstation
-
-See the [deployment guide](docs/deployment.md) for setup instructions.
-
-### Prerequisites
-
-| What | Dev Quickstart | Self-Hosted | Standalone Counter |
-|------|----------------|-------------|--------------------|
-| Docker | Required | Required | Not needed |
-| Go 1.25+ | Required | Required on operator workstation | Required |
-| Domain + DNS | Not needed | Required | Not needed |
-| SSH agent | Not needed | Required | Required |
+Hosted Teamserver runs the C2 teamserver on a dedicated host and the operator TUI natively on each operator workstation.
 
 ## Architecture
+
+At a high level, the operator TUI (`Counter`) talks to the C2 teamserver (`Kitchen`), which manages implants (`Brisket`) running on compromised CI runners and serves the live attack graph.
 
 ```
 ┌──────────────┐
@@ -150,8 +133,8 @@ See the [deployment guide](docs/deployment.md) for setup instructions.
 └──────────────┘   Live Updates  └──────────────┘
                                    │         ▲
                                    │         │
-                        Creates PR │         │ Stager fetches Brisket binary
-                                   │         │ Brisket HTTP Beacon/Commands
+                        Creates PR │         │ Stager fetches implant binary
+                                   │         │ Implant HTTP Beacon/Commands
                                    ▼         │
 ┌────────────────────────────────────────────┴──────────────────────────────────┐
 │  GITHUB.COM                                                                   │
@@ -166,13 +149,6 @@ See the [deployment guide](docs/deployment.md) for setup instructions.
 │                                   └─────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────────┘
 ```
-
-| Component | Description |
-|-----------|-------------|
-| **The Counter** | Operator TUI  - Bubbletea-based terminal interface. Connects to Kitchen over WebSocket. Runs on the operator's workstation. |
-| **The Kitchen** | Teamserver / C2  - HTTP API, WebSocket streaming, attack graph storage (BBolt), GitHub API proxy. All GitHub tokens stay server-side. |
-| **The Brisket** | Implant  - Static Go binary (~8MB) that runs on compromised CI runners. Beacons to Kitchen over HTTP. |
-| **Browser View** | Cytoscape.js attack graph visualization with live WebSocket updates. Served by Kitchen at `/graph`. |
 
 ## Features
 
