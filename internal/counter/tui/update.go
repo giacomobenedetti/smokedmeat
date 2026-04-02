@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
@@ -136,7 +137,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.config.KeyComment = sw.Keys[sw.SelectedKey].Comment
 		}
 		m.lightRye = rye.NewLightRye(sw.KitchenURL)
-		m.setupWizard = &SetupWizardState{Step: 5}
+		m.setupWizard = &SetupWizardState{
+			Step:          5,
+			BackStepFloor: 5,
+		}
 		m.setupInput.SetValue("")
 		m.setupInput.Placeholder = "ghp_xxxxxxxxxxxxxxxxxxxx"
 		m.setupInput.Blur()
@@ -145,9 +149,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupBrowserOpenedMsg:
 		if m.setupWizard != nil && m.setupWizard.Step == 5 {
 			m.setupWizard.Status = ""
-			m.setupWizard.TokenSubStep = 1
+			m.setupWizard.TokenSubStep = setupTokenSubStepInput
 			m.setupInput.SetValue("")
 			m.setupInput.Placeholder = "ghp_xxxxxxxxxxxxxxxxxxxx"
+			m.setupInput.EchoMode = textinput.EchoPassword
+			m.setupInput.EchoCharacter = '•'
 			m.setupInput.Focus()
 		}
 		return m, nil
@@ -167,7 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.setupWizard.Status = ""
 		m.setupWizard.Error = fmt.Sprintf("Token error (%s): %v", msg.Source, msg.Err)
-		m.setupWizard.TokenSubStep = 0
+		m.setupWizard.TokenSubStep = setupTokenSubStepChoice
 		return m, nil
 
 	case SetupTokenInfoMsg:
@@ -191,9 +197,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.initialTokenInfo = info
 		m.pivotToken = nil
 
-		sw.Step = 6
-		sw.TargetSubStep = 0
-		m.setupInput.Blur()
+		m.finishSetupTokenVerification()
 		return m, nil
 
 	case SetupTokenInfoErrorMsg:
@@ -213,9 +217,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.initialTokenInfo = info
 		m.pivotToken = nil
 
-		sw.Step = 6
-		sw.TargetSubStep = 0
-		m.setupInput.Blur()
+		m.finishSetupTokenVerification()
 		return m, nil
 
 	case SetupAnalysisCompletedMsg:
@@ -1039,7 +1041,7 @@ func (m Model) handlePasteMsg(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	if m.view == ViewSetupWizard && sw != nil {
 		if (sw.Step == 1) ||
 			(sw.Step == 3 && sw.OperatorNameChoice == OperatorNameCustom) ||
-			(sw.Step == 5 && sw.TokenSubStep == 1) ||
+			(sw.Step == 5 && sw.TokenSubStep == setupTokenSubStepInput) ||
 			(sw.Step == 6 && sw.TargetSubStep == 1) {
 			var cmd tea.Cmd
 			m.setupInput, cmd = m.setupInput.Update(msg)
