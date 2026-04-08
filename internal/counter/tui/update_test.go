@@ -171,6 +171,59 @@ func TestModel_Update_LOTPDeploymentFailed(t *testing.T) {
 	assert.NotNil(t, cmd)
 }
 
+func TestModel_Update_AnalysisMetadataSyncCompleted_RefreshesPrivateLabels(t *testing.T) {
+	m := NewModel(Config{SessionID: "test-session"})
+	m.kitchenClient = &mockKitchenClient{}
+	m.pantry = pantry.New()
+
+	repo := pantry.NewRepository("acme", "private-repo", "github")
+	require.NoError(t, m.pantry.AddAsset(repo))
+
+	m.lootStash = []CollectedSecret{
+		{
+			Name:       "GITHUB_TOKEN",
+			Value:      "ghs_test",
+			Repository: "acme/private-repo",
+			Type:       "github_pat",
+		},
+	}
+	m.RebuildTree()
+	m.RebuildLootTree()
+	require.NotNil(t, m.treeRoot)
+	require.NotNil(t, m.lootTreeRoot)
+	assert.NotEqual(t, TreeStateHighValue, m.treeRoot.Children[0].State)
+	assert.NotEqual(t, TreeStateHighValue, m.lootTreeRoot.Children[0].State)
+
+	result, cmd := m.Update(AnalysisMetadataSyncMsg{
+		Sync: counter.AnalysisMetadataSyncPayload{
+			Status:  counter.AnalysisMetadataSyncStatusCompleted,
+			Message: "Repository access updated",
+		},
+	})
+
+	model := result.(Model)
+	require.NotNil(t, cmd)
+	require.Len(t, model.activityLog.entries, 1)
+	assert.Contains(t, model.activityLog.entries[0].Message, "Repository access updated")
+
+	result, _ = model.Update(KnownEntitiesFetchedMsg{
+		Entities: []counter.KnownEntityPayload{
+			{
+				ID:         "repo:acme/private-repo",
+				EntityType: "repo",
+				Name:       "acme/private-repo",
+				IsPrivate:  true,
+			},
+		},
+	})
+
+	model = result.(Model)
+	require.NotNil(t, model.treeRoot)
+	require.NotNil(t, model.lootTreeRoot)
+	assert.Equal(t, TreeStateHighValue, model.treeRoot.Children[0].State)
+	assert.Equal(t, TreeStateHighValue, model.lootTreeRoot.Children[0].State)
+}
+
 // =============================================================================
 // Beacon/Coleslaw Message Tests
 // =============================================================================
@@ -619,6 +672,39 @@ func TestModel_Update_PantryFetched(t *testing.T) {
 
 	model := result.(Model)
 	assert.NotNil(t, model.pantry)
+	require.Len(t, model.output, 1)
+	assert.Contains(t, model.output[0].Content, "Loaded attack graph:")
+}
+
+func TestModel_Update_PantryFetched_AnnouncesInitialVulnerabilityLoad(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	p := pantry.New()
+	repo := pantry.NewRepository("acme", "api", "github")
+	vuln := pantry.NewVulnerability("injection", "pkg:github/acme/api", ".github/workflows/ci.yml", 42)
+	require.NoError(t, p.AddAsset(repo))
+	require.NoError(t, p.AddAsset(vuln))
+
+	result, _ := m.Update(PantryFetchedMsg{Pantry: p})
+
+	model := result.(Model)
+	assert.NotNil(t, model.pantry)
+	require.Len(t, model.output, 2)
+	assert.Contains(t, model.output[1].Content, "Loaded 1 vulnerabilities from attack graph")
+	assert.NotContains(t, model.output[1].Content, "previous session")
+}
+
+func TestModel_Update_PantryFetched_DoesNotAnnounceRestoreAfterCurrentAnalysis(t *testing.T) {
+	m := NewModel(Config{SessionID: "test"})
+	m.analysisComplete = true
+	m.vulnerabilities = []Vulnerability{{ID: "V001", Repository: "acme/api", RuleID: "injection"}}
+	p := createTestPantry()
+
+	result, _ := m.Update(PantryFetchedMsg{Pantry: p})
+
+	model := result.(Model)
+	assert.NotNil(t, model.pantry)
+	require.Len(t, model.output, 1)
+	assert.Contains(t, model.output[0].Content, "Loaded attack graph:")
 }
 
 func TestModel_Update_PantryFetchError(t *testing.T) {
